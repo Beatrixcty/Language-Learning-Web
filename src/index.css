@@ -1,0 +1,66 @@
+:root {
+  --bg: #e4edff;
+  --bg-elev: #ffffff;
+  --bg-soft: #eff4ff;
+  --ink: #1a1530;
+  --ink-muted: #4a4460;
+  --ink-soft: #8780a5;
+  --line: rgba(26, 21, 48, 0.1);
+  --line-strong: rgba(26, 21, 48, 0.16);
+  --accent: #6366f1;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(99, 102, 241, 0.12);
+  --pink: #ff6b9d;
+  --pink-soft: rgba(255, 107, 157, 0.14);
+  --mint: #06d6a0;
+  --honey: #ffd166;
+
+  font-family: "Inter", "Segoe UI", "Helvetica Neue", sans-serif;
+  line-height: 1.55;
+  font-weight: 400;
+  color: var(--ink);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(1000px 600px at 10% -10%, rgba(56, 130, 246, 0.22), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(99, 102, 241, 0.2), transparent 55%),
+    radial-gradient(700px 400px at 50% 110%, rgba(255, 107, 157, 0.12), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
