@@ -148,17 +148,25 @@ class BeaLingoApiTests(unittest.TestCase):
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(authorized.status_code, 200)
 
-    def test_upstash_storage_encrypts_values(self):
-        key = main.Fernet.generate_key().decode("utf-8")
-        with patch.object(main, "UPSTASH_REDIS_REST_URL", "https://example.upstash.io"), patch.object(
-            main, "UPSTASH_REDIS_REST_TOKEN", "private-token"
-        ), patch.object(main, "CREDENTIAL_ENCRYPTION_KEY", key), patch.object(
-            main, "_upstash_request"
-        ) as request:
-            main._write_upstash_secret("chatgpt.json", {"refresh_token": "very-secret"})
-        command = request.call_args.args[0]
-        self.assertEqual(command[:2], ["SET", "bealingo:secret:chatgpt.json"])
-        self.assertNotIn("very-secret", command[2])
+    def test_demo_rate_limit_blocks_ai_before_provider_call(self):
+        main.demo_rate_counts.clear()
+        with patch.object(main, "BEALINGO_MODE", "demo"), patch.object(
+            main, "PRIVATE_PROXY_SECRET", "expected-secret"
+        ), patch.dict(main.DEMO_RATE_LIMITS, {"/api/generate-lesson": 0}):
+            response = self.client.post(
+                "/api/generate-lesson",
+                headers={
+                    "x-bealingo-proxy-secret": "expected-secret",
+                    "x-bealingo-client-ip": "203.0.113.10",
+                },
+                json={
+                    "profile": {"language": "Portuguese", "level": "Beginner"},
+                    "style": "flashcards",
+                    "count": 3,
+                },
+            )
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("daily AI limit", response.json()["error"])
 
 
 if __name__ == "__main__":

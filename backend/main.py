@@ -7,7 +7,7 @@ import hashlib
 import secrets
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -23,7 +23,6 @@ from pydantic import BaseModel
 from groq import Groq
 from groq import BadRequestError
 import yaml
-from cryptography.fernet import Fernet, InvalidToken
 from vocab_data import get_static_vocab
 
 load_dotenv()
@@ -37,11 +36,13 @@ groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 groq_review_model = os.getenv("GROQ_REVIEW_MODEL", "openai/gpt-oss-120b")
 BEALINGO_MODE = os.getenv("BEALINGO_MODE", "local").strip().lower()
 PRIVATE_PROXY_SECRET = os.getenv("PRIVATE_PROXY_SECRET", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").rstrip("/")
-UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
-CREDENTIAL_ENCRYPTION_KEY = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
+DEMO_RATE_LIMITS = {
+    "/api/assess-sentence": int(os.getenv("DEMO_ASSESSMENTS_PER_DAY", "6")),
+    "/api/generate-lesson": int(os.getenv("DEMO_LESSONS_PER_DAY", "4")),
+    "/api/generate-sentences": int(os.getenv("DEMO_LESSONS_PER_DAY", "4")),
+    "/api/ask-coach": int(os.getenv("DEMO_COACH_QUESTIONS_PER_DAY", "5")),
+}
+demo_rate_counts: dict[tuple[str, str, str], int] = {}
 
 CHATGPT_AUTH_URL = "https://auth.openai.com/api/accounts/authorize"
 CHATGPT_TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token"
@@ -74,6 +75,27 @@ async def require_private_proxy(request, call_next):
         from fastapi.responses import JSONResponse
 
         return JSONResponse({"error": "Not authorized"}, status_code=401)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def limit_public_demo_ai(request, call_next):
+    """Best-effort per-IP caps for the public portfolio demo."""
+    limit = DEMO_RATE_LIMITS.get(request.url.path) if BEALINGO_MODE == "demo" else None
+    if limit is not None:
+        from fastapi.responses import JSONResponse
+
+        forwarded = request.headers.get("x-bealingo-client-ip") or request.headers.get("x-forwarded-for") or "unknown"
+        client_ip = forwarded.split(",", 1)[0].strip()
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        key = (day, client_ip, request.url.path)
+        used = demo_rate_counts.get(key, 0)
+        if used >= limit:
+            return JSONResponse(
+                {"error": "This public demo has reached its daily AI limit for your connection. Please try again tomorrow."},
+                status_code=429,
+            )
+        demo_rate_counts[key] = used + 1
     return await call_next(request)
 
 app.add_middleware(
@@ -198,12 +220,6 @@ def format_style_amount(profile: dict) -> str:
 
 
 def _write_private_json(path: Path, value: dict) -> None:
-    if _upstash_secret_storage_enabled():
-        _write_upstash_secret(path.name, value)
-        return
-    if _supabase_secret_storage_enabled():
-        _write_supabase_secret(path.name, value)
-        return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -213,112 +229,11 @@ def _write_private_json(path: Path, value: dict) -> None:
 
 
 def _read_private_json(path: Path) -> dict | None:
-    if _upstash_secret_storage_enabled():
-        return _read_upstash_secret(path.name)
-    if _supabase_secret_storage_enabled():
-        return _read_supabase_secret(path.name)
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
         return parsed if isinstance(parsed, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
-
-
-def _upstash_secret_storage_enabled() -> bool:
-    configured = bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and CREDENTIAL_ENCRYPTION_KEY)
-    partially_configured = any((UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN))
-    if partially_configured and not configured:
-        raise RuntimeError("Upstash secret storage requires UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, and CREDENTIAL_ENCRYPTION_KEY")
-    return configured
-
-
-def _upstash_request(command: list[Any]) -> Any:
-    response = httpx.post(
-        UPSTASH_REDIS_REST_URL,
-        headers={
-            "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json=command,
-        timeout=20,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("error"):
-        raise RuntimeError(f"Upstash rejected BeaLingo secret storage: {payload['error']}")
-    return payload.get("result")
-
-
-def _write_upstash_secret(key: str, value: dict) -> None:
-    plaintext = json.dumps(value, ensure_ascii=False).encode("utf-8")
-    encrypted_value = _credential_cipher().encrypt(plaintext).decode("utf-8")
-    _upstash_request(["SET", f"bealingo:secret:{key}", encrypted_value])
-
-
-def _read_upstash_secret(key: str) -> dict | None:
-    encrypted_value = _upstash_request(["GET", f"bealingo:secret:{key}"])
-    if not encrypted_value:
-        return None
-    try:
-        plaintext = _credential_cipher().decrypt(str(encrypted_value).encode("utf-8"))
-        parsed = json.loads(plaintext.decode("utf-8"))
-    except (InvalidToken, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RuntimeError(f"Stored BeaLingo secret '{key}' could not be decrypted") from exc
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _supabase_secret_storage_enabled() -> bool:
-    configured = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and CREDENTIAL_ENCRYPTION_KEY)
-    partially_configured = any((SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, CREDENTIAL_ENCRYPTION_KEY))
-    if partially_configured and not configured:
-        raise RuntimeError("Supabase secret storage requires SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and CREDENTIAL_ENCRYPTION_KEY")
-    return configured
-
-
-def _credential_cipher() -> Fernet:
-    try:
-        return Fernet(CREDENTIAL_ENCRYPTION_KEY.encode("utf-8"))
-    except (ValueError, TypeError) as exc:
-        raise RuntimeError("CREDENTIAL_ENCRYPTION_KEY must be a valid Fernet key") from exc
-
-
-def _supabase_headers() -> dict[str, str]:
-    return {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
-def _write_supabase_secret(key: str, value: dict) -> None:
-    plaintext = json.dumps(value, ensure_ascii=False).encode("utf-8")
-    encrypted_value = _credential_cipher().encrypt(plaintext).decode("utf-8")
-    response = httpx.post(
-        f"{SUPABASE_URL}/rest/v1/bealingo_secrets?on_conflict=key",
-        headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
-        json={"key": key, "encrypted_value": encrypted_value},
-        timeout=20,
-    )
-    response.raise_for_status()
-
-
-def _read_supabase_secret(key: str) -> dict | None:
-    response = httpx.get(
-        f"{SUPABASE_URL}/rest/v1/bealingo_secrets",
-        headers=_supabase_headers(),
-        params={"key": f"eq.{key}", "select": "encrypted_value", "limit": "1"},
-        timeout=20,
-    )
-    response.raise_for_status()
-    rows = response.json()
-    if not rows:
-        return None
-    try:
-        plaintext = _credential_cipher().decrypt(rows[0]["encrypted_value"].encode("utf-8"))
-        parsed = json.loads(plaintext.decode("utf-8"))
-    except (InvalidToken, KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RuntimeError(f"Stored BeaLingo secret '{key}' could not be decrypted") from exc
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _chatgpt_plan_enabled() -> bool:
@@ -1820,8 +1735,9 @@ def generate_lesson(req: LessonRequest) -> dict[str, Any]:
             temperature=0.7,
             max_tokens=900,
             response_schema=response_schema,
+            attempts=1 if BEALINGO_MODE == "demo" else 3,
         )
-        reviewed = _review_lesson_quality(parsed, req.profile, response_schema)
+        reviewed = parsed if BEALINGO_MODE == "demo" else _review_lesson_quality(parsed, req.profile, response_schema)
         return {"style": style, "content": reviewed}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {str(e)[:400]}"}

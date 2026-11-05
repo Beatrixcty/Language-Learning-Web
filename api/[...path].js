@@ -22,6 +22,7 @@ export default async function handler(request, response) {
 
   const headers = {
     'x-bealingo-proxy-secret': proxySecret,
+    'x-bealingo-client-ip': String(request.headers['x-forwarded-for'] || request.socket?.remoteAddress || 'unknown').split(',')[0],
   }
   if (request.headers['content-type']) headers['content-type'] = request.headers['content-type']
 

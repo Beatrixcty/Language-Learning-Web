@@ -15,8 +15,8 @@ BeaLingo is an adaptive personal language coach. A learner describes their targe
 
 - Frontend: React 18 and Vite
 - Backend: FastAPI and Uvicorn
-- AI generation: connected ChatGPT plan in personal mode; Groq in public demo mode
-- Deployment: Vercel frontend/API proxy, Render FastAPI backend, encrypted Upstash credential storage
+- AI generation: connected ChatGPT plan on localhost; Groq in the public demo
+- Deployment: public Vercel frontend/API proxy and Render FastAPI demo backend
 - Local server cache: SQLite (`backend/bealingo.db`)
 - Learner data: browser `localStorage`
 
@@ -53,10 +53,9 @@ Vite prints the URL it selected. The backend accepts local `localhost` and `127.
 Backend (`backend/.env`):
 
 - `GROQ_API_KEY` — required for generated lessons and coach chat.
-- `GROQ_MODEL` — optional Groq model override; defaults to `openai/gpt-oss-20b`.
-- `BEALINGO_MODE` — `local`, `personal`, or `demo`. Demo mode cannot read ChatGPT credentials.
+- `GROQ_MODEL` — optional Groq model override; defaults to `qwen/qwen3.8-27b`.
+- `BEALINGO_MODE` — `local` or `demo`. Demo mode cannot read ChatGPT credentials.
 - `PRIVATE_PROXY_SECRET` — required by deployed backends; must match the server-only Vercel value.
-- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, and `CREDENTIAL_ENCRYPTION_KEY` — personal deployment only; store the connected ChatGPT credential encrypted at rest.
 
 Frontend (`.env`, optional):
 
@@ -64,12 +63,12 @@ Frontend (`.env`, optional):
 
 ## Cloud deployment
 
-The repository supports two isolated deployments from the same codebase:
+The repository supports two isolated ways to run from the same codebase:
 
-- **Personal:** a Vercel deployment protected by Vercel Authentication, a personal Render service, and a dedicated private Upstash database. The ChatGPT credential is encrypted before it is stored. Only the Vercel server-side proxy can call Render.
-- **Portfolio demo:** a public Vercel deployment and separate Render service in `demo` mode. It uses Groq and has no access to personal ChatGPT credentials.
+- **Local personal version:** runs only on the laptop in `local` mode and uses the locally stored ChatGPT-plan connection.
+- **Portfolio demo:** a public Vercel deployment and Render service in `demo` mode. It uses Groq and cannot read the local ChatGPT credential.
 
-Configure each Vercel project with `BEALINGO_BACKEND_URL` and `PRIVATE_PROXY_SECRET`; set `VITE_BEALINGO_MODE` to either `personal` or `demo`. The corresponding Render service must use the same proxy secret and matching `BEALINGO_MODE`.
+Configure Vercel with `BEALINGO_BACKEND_URL`, `PRIVATE_PROXY_SECRET`, and `VITE_BEALINGO_MODE=demo`. Render must use the same proxy secret and `BEALINGO_MODE=demo`.
 
 All Vercel variables named above are server-side except `VITE_BEALINGO_MODE`. Never prefix a credential, provider key, backend URL, or proxy secret with `VITE_`.
 
@@ -99,8 +98,7 @@ backend/vocab_data.py       Static placement-test vocabulary
 backend/db.py               SQLite vocabulary-list cache
 backend/tests/              Backend regression tests
 api/[...path].js            Vercel server-only Render proxy
-render.yaml                 Personal and demo Render services
-supabase/migrations/        Optional Supabase storage alternative
+render.yaml                 Public demo Render service
 ```
 
 ## API

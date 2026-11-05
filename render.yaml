@@ -1,29 +1,5 @@
 services:
   - type: web
-    name: bealingo-personal-api
-    runtime: python
-    plan: free
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /api/health
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.7
-      - key: BEALINGO_MODE
-        value: personal
-      - key: GROQ_API_KEY
-        sync: false
-      - key: PRIVATE_PROXY_SECRET
-        sync: false
-      - key: UPSTASH_REDIS_REST_URL
-        sync: false
-      - key: UPSTASH_REDIS_REST_TOKEN
-        sync: false
-      - key: CREDENTIAL_ENCRYPTION_KEY
-        sync: false
-
-  - type: web
     name: bealingo-demo-api
     runtime: python
     plan: free
