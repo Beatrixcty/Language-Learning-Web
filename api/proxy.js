@@ -10,11 +10,11 @@ export default async function handler(request, response) {
     return response.status(503).json({ error: 'BeaLingo deployment is not configured' })
   }
 
-  // Vercel's catch-all query shape differs between runtimes. Derive the
-  // upstream path from the actual request URL so `/api/health` always maps to
-  // the backend's `/api/health`, rather than accidentally duplicating `api`.
-  const requestUrl = new URL(request.url, 'https://bealingo.local')
-  const path = requestUrl.pathname.replace(/^\/api\/?/, '')
+  const rawPath = request.query.path
+  const fallbackPath = new URL(request.url, 'https://bealingo.local').pathname
+    .replace(/^\/api\/?/, '')
+    .replace(/^proxy\/?/, '')
+  const path = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath || fallbackPath)
   const query = new URLSearchParams()
   for (const [key, value] of Object.entries(request.query)) {
     if (key === 'path') continue
