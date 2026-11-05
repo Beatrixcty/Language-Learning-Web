@@ -16,9 +16,9 @@ services:
         sync: false
       - key: PRIVATE_PROXY_SECRET
         sync: false
-      - key: SUPABASE_URL
+      - key: UPSTASH_REDIS_REST_URL
         sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
+      - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
       - key: CREDENTIAL_ENCRYPTION_KEY
         sync: false

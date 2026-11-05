@@ -16,7 +16,7 @@ BeaLingo is an adaptive personal language coach. A learner describes their targe
 - Frontend: React 18 and Vite
 - Backend: FastAPI and Uvicorn
 - AI generation: connected ChatGPT plan in personal mode; Groq in public demo mode
-- Deployment: Vercel frontend/API proxy, Render FastAPI backend, encrypted Supabase credential storage
+- Deployment: Vercel frontend/API proxy, Render FastAPI backend, encrypted Upstash credential storage
 - Local server cache: SQLite (`backend/bealingo.db`)
 - Learner data: browser `localStorage`
 
@@ -56,7 +56,7 @@ Backend (`backend/.env`):
 - `GROQ_MODEL` — optional Groq model override; defaults to `openai/gpt-oss-20b`.
 - `BEALINGO_MODE` — `local`, `personal`, or `demo`. Demo mode cannot read ChatGPT credentials.
 - `PRIVATE_PROXY_SECRET` — required by deployed backends; must match the server-only Vercel value.
-- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `CREDENTIAL_ENCRYPTION_KEY` — personal deployment only; store the connected ChatGPT credential encrypted at rest.
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, and `CREDENTIAL_ENCRYPTION_KEY` — personal deployment only; store the connected ChatGPT credential encrypted at rest.
 
 Frontend (`.env`, optional):
 
@@ -66,10 +66,10 @@ Frontend (`.env`, optional):
 
 The repository supports two isolated deployments from the same codebase:
 
-- **Personal:** a Vercel deployment protected by Vercel Authentication, a personal Render service, and a private Supabase secret table. The ChatGPT credential is encrypted before it is stored. Only the Vercel server-side proxy can call Render.
+- **Personal:** a Vercel deployment protected by Vercel Authentication, a personal Render service, and a dedicated private Upstash database. The ChatGPT credential is encrypted before it is stored. Only the Vercel server-side proxy can call Render.
 - **Portfolio demo:** a public Vercel deployment and separate Render service in `demo` mode. It uses Groq and has no access to personal ChatGPT credentials.
 
-Create the Supabase table with `supabase/migrations/202611050001_create_bealingo_secrets.sql`. Configure each Vercel project with `BEALINGO_BACKEND_URL` and `PRIVATE_PROXY_SECRET`; set `VITE_BEALINGO_MODE` to either `personal` or `demo`. The corresponding Render service must use the same proxy secret and matching `BEALINGO_MODE`.
+Configure each Vercel project with `BEALINGO_BACKEND_URL` and `PRIVATE_PROXY_SECRET`; set `VITE_BEALINGO_MODE` to either `personal` or `demo`. The corresponding Render service must use the same proxy secret and matching `BEALINGO_MODE`.
 
 All Vercel variables named above are server-side except `VITE_BEALINGO_MODE`. Never prefix a credential, provider key, backend URL, or proxy secret with `VITE_`.
 
@@ -100,7 +100,7 @@ backend/db.py               SQLite vocabulary-list cache
 backend/tests/              Backend regression tests
 api/[...path].js            Vercel server-only Render proxy
 render.yaml                 Personal and demo Render services
-supabase/migrations/        Private encrypted-secret table
+supabase/migrations/        Optional Supabase storage alternative
 ```
 
 ## API

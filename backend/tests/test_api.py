@@ -148,6 +148,18 @@ class BeaLingoApiTests(unittest.TestCase):
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(authorized.status_code, 200)
 
+    def test_upstash_storage_encrypts_values(self):
+        key = main.Fernet.generate_key().decode("utf-8")
+        with patch.object(main, "UPSTASH_REDIS_REST_URL", "https://example.upstash.io"), patch.object(
+            main, "UPSTASH_REDIS_REST_TOKEN", "private-token"
+        ), patch.object(main, "CREDENTIAL_ENCRYPTION_KEY", key), patch.object(
+            main, "_upstash_request"
+        ) as request:
+            main._write_upstash_secret("chatgpt.json", {"refresh_token": "very-secret"})
+        command = request.call_args.args[0]
+        self.assertEqual(command[:2], ["SET", "bealingo:secret:chatgpt.json"])
+        self.assertNotIn("very-secret", command[2])
+
 
 if __name__ == "__main__":
     unittest.main()
