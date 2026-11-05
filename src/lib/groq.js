@@ -1,4 +1,14 @@
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+const API_BASE = import.meta.env.VITE_API_BASE || ''
+
+export function getChatGPTConnectUrl() {
+  return `${API_BASE}/api/chatgpt/connect`
+}
+
+export async function getChatGPTStatus() {
+  const response = await fetch(`${API_BASE}/api/chatgpt/status`)
+  if (!response.ok) return { connected: false, provider: 'Groq free tier' }
+  return response.json()
+}
 
 async function postJson(path, body) {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -18,6 +28,10 @@ async function postJson(path, body) {
 export async function fetchVocabList(targetLanguage) {
   const data = await postJson('/api/vocab-list', { targetLanguage })
   return data.words
+}
+
+export async function assessOnboardingSentence({ targetLanguage, nativeLanguage, sentence }) {
+  return postJson('/api/assess-sentence', { targetLanguage, nativeLanguage, sentence })
 }
 
 export async function generateLesson(profile, style, count) {

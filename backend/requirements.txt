@@ -1,5 +1,10 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 groq==0.30.0
+google-genai==0.3.0
 python-dotenv==1.0.1
 pydantic==2.9.2
+PyYAML==6.0.3
+httpx==0.28.1
+PyJWT[crypto]==2.10.1
+cryptography==46.0.3

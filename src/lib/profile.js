@@ -40,7 +40,11 @@ export function saveLearningProfile(answers) {
     schedule: answers.schedule || existingProfile.schedule || null,
     newMaterialPace: answers.newMaterialPace || existingProfile.newMaterialPace || null,
     quizFrequency: answers.quizFrequency || existingProfile.quizFrequency || null,
-    completedSessionDays: existingProfile.completedSessionDays || [],
+    completedSessionDays: Array.isArray(answers.completedSessionDays)
+      ? answers.completedSessionDays
+      : existingProfile.completedSessionDays || [],
+    lastCompletedAt: answers.lastCompletedAt || existingProfile.lastCompletedAt || null,
+    lastBatchFeedbackSummary: answers.lastBatchFeedbackSummary || existingProfile.lastBatchFeedbackSummary || null,
     createdAt: existingProfile.createdAt || now,
     updatedAt: now,
   }
@@ -59,8 +63,14 @@ export function hasLearningProfile() {
 }
 
 export function clearLearningProfile() {
-  window.localStorage.removeItem(PROFILE_KEY)
-  window.localStorage.removeItem(SESSION_DATA_KEY)
+  const appKeys = []
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index)
+    if (key?.startsWith('bealingo-') && key !== 'bealingo-active-page') {
+      appKeys.push(key)
+    }
+  }
+  appKeys.forEach((key) => window.localStorage.removeItem(key))
 }
 
 export function getCompletedSessionCount(profile) {

@@ -7,10 +7,11 @@ import {
   markSessionComplete,
   saveLearningProfile,
 } from '../lib/profile.js'
-import { askCoach, fetchVocabList, generateLesson, generatePracticeSession } from '../lib/groq.js'
+import { assessOnboardingSentence, askCoach, fetchVocabList, generateLesson, generatePracticeSession } from '../lib/groq.js'
 import {
   addItemsToPile,
   extractItemsFromLesson,
+  markCardFamiliar,
   markCardKnown,
   markCardUnknown,
   pickRevisionCards,
@@ -22,6 +23,7 @@ const baseSteps = [
   'language',
   'languageVariant',
   'languageRegion',
+  'nativeLanguage',
   'selfLevel',
   'vocabTest',
   'sentenceTask',
@@ -39,7 +41,6 @@ const baseSteps = [
 const learningStyleOptions = [
   'Daily sentences',
   'Flashcards',
-  'Quizzes',
   'Conversation scenarios',
 ]
 
@@ -158,9 +159,12 @@ const languageAliases = {
 const sessionStorageKey = 'bealingo-session-data'
 const defaultMessages = [{ role: 'coach', text: 'Hi! What should I call you?' }]
 const difficultyTooltip = 'This feedback helps BeaLingo adjust future lessons to your level.'
-const MAX_EXTRA_REQUESTS_PER_DAY = 2
-const MAX_EXTRA_ITEMS_PER_REQUEST = 5
+const MAX_EXTRA_REQUESTS_PER_DAY = 1
+const MAX_EXTRA_ITEMS_PER_REQUEST = 3
+const EXTRA_LEARNING_ENABLED = false
 const MAX_PRACTICE_QUESTIONS = 6
+const PRACTICE_CACHE_VERSION = 3
+const LESSON_CACHE_VERSION = 4
 
 function renderDifficultyButtons(itemKey, markItemDifficulty, stopPropagation = false) {
   const withStop = (handler) => (event) => {
@@ -178,16 +182,23 @@ function renderDifficultyButtons(itemKey, markItemDifficulty, stopPropagation = 
 }
 
 export default function SessionPage() {
+  const [restoredSession] = useState(() => getSavedSessionData())
   const [savedProfile, setSavedProfile] = useState(() => getLearningProfile())
-  const [stepIndex, setStepIndex] = useState(0)
-  const [inputValue, setInputValue] = useState('')
-  const [answers, setAnswers] = useState({})
-  const [selectedOptions, setSelectedOptions] = useState([])
-  const [pendingLanguageSuggestion, setPendingLanguageSuggestion] = useState(null)
-  const [messages, setMessages] = useState(defaultMessages)
+  const [stepIndex, setStepIndex] = useState(restoredSession.stepIndex)
+  const [inputValue, setInputValue] = useState(restoredSession.inputValue)
+  const [answers, setAnswers] = useState(restoredSession.answers)
+  const [selectedOptions, setSelectedOptions] = useState(restoredSession.selectedOptions)
+  const [pendingLanguageSuggestion, setPendingLanguageSuggestion] = useState(restoredSession.pendingLanguageSuggestion)
+  const [messages, setMessages] = useState(restoredSession.messages)
   const [isCoachTyping, setIsCoachTyping] = useState(false)
-  const [vocabData, setVocabData] = useState(null)
-  const [vocabSelections, setVocabSelections] = useState(new Set())
+  const [vocabData, setVocabData] = useState(restoredSession.vocabData)
+  const [vocabSelections, setVocabSelections] = useState(() => new Set(restoredSession.vocabSelections))
+
+  useEffect(() => {
+    if (savedProfile || restoredSession.stepIndex < baseSteps.length) return
+    const recoveredProfile = saveLearningProfile(restoredSession.answers)
+    setSavedProfile(recoveredProfile)
+  }, [restoredSession, savedProfile])
 
   const stepKey = baseSteps[stepIndex]
   const currentStep = getStepConfig(stepKey, answers)
@@ -216,11 +227,37 @@ export default function SessionPage() {
   }
 
   useEffect(() => {
-    window.localStorage.removeItem(sessionStorageKey)
-  }, [])
+    if (savedProfile) return
+    window.localStorage.setItem(sessionStorageKey, JSON.stringify({
+      stepIndex,
+      inputValue,
+      answers,
+      selectedOptions,
+      pendingLanguageSuggestion,
+      messages,
+      vocabData,
+      vocabSelections: [...vocabSelections],
+    }))
+  }, [
+    answers,
+    inputValue,
+    messages,
+    pendingLanguageSuggestion,
+    savedProfile,
+    selectedOptions,
+    stepIndex,
+    vocabData,
+    vocabSelections,
+  ])
 
   if (savedProfile) {
-    return <ReturningUserPlaceholder profile={savedProfile} onReset={handleResetProfile} />
+    return (
+      <ReturningUserPlaceholder
+        profile={savedProfile}
+        onReset={handleResetProfile}
+        onProfileChange={setSavedProfile}
+      />
+    )
   }
 
   const submitResolvedStep = (step, displayValue, canonicalValue = displayValue) => {
@@ -274,9 +311,11 @@ export default function SessionPage() {
 
     window.setTimeout(() => {
       if (!nextStepKey) {
-        setMessages((current) => [...current, { role: 'coach', text: 'Perfect. I have enough to start shaping your setup.' }])
+        const profile = saveLearningProfile(updatedAnswers)
+        setMessages((current) => [...current, { role: 'coach', text: 'Perfect. Your preferences are saved and your first lesson is ready.' }])
         setStepIndex(baseSteps.length)
         setIsCoachTyping(false)
+        setSavedProfile(profile)
         return
       }
 
@@ -305,7 +344,7 @@ export default function SessionPage() {
       ])
       setStepIndex(baseSteps.indexOf('vocabTest'))
       setIsCoachTyping(false)
-    } catch (error) {
+    } catch {
       setMessages((current) => [
         ...current,
         { role: 'coach', text: `I couldn't load the vocab check. Let's move on.` },
@@ -315,9 +354,9 @@ export default function SessionPage() {
     }
   }
 
-  const submitVocabResult = () => {
+  const submitVocabResult = (knownOverride = null) => {
     const total = vocabData.length
-    const known = vocabSelections.size
+    const known = Number.isFinite(knownOverride) ? knownOverride : vocabSelections.size
     const pct = Math.round((known / total) * 100)
 
     let vocabLevel
@@ -340,7 +379,38 @@ export default function SessionPage() {
     setStepIndex(baseSteps.indexOf('sentenceTask'))
   }
 
-  const submitSentenceTask = (text) => {
+  const submitSentenceTask = async (text) => {
+    const displayLanguage = buildLanguageSummary(answers) || answers.language || 'your target language'
+    setIsCoachTyping(true)
+    let assessment
+    try {
+      assessment = await assessOnboardingSentence({
+        targetLanguage: displayLanguage,
+        nativeLanguage: answers.nativeLanguage || 'English',
+        sentence: text,
+      })
+    } catch {
+      setMessages((current) => [
+        ...current,
+        { role: 'user', text },
+        { role: 'coach', text: "I couldn't check that sentence just now. Please try it once more." },
+      ])
+      setIsCoachTyping(false)
+      return
+    }
+
+    if (assessment.verdict === 'wrong_language' || assessment.verdict === 'not_meaningful') {
+      setMessages((current) => [
+        ...current,
+        { role: 'user', text },
+        { role: 'coach', text: assessment.feedback || `Please try another sentence in ${displayLanguage}.` },
+      ])
+      setIsCoachTyping(false)
+      return
+    }
+
+    // Kept as an offline fallback path; a successful AI assessment above is authoritative.
+    if (!assessment) {
     const targetLanguage = (buildLanguageSummary(answers) || answers.language || '').toLowerCase()
 
     const hasHan = /[\u4e00-\u9fff]/.test(text)
@@ -395,24 +465,21 @@ export default function SessionPage() {
       return
     }
 
-    let sentenceLevel
-    if (needsNonLatin) {
-      if (wordCount <= 6) sentenceLevel = 'beginner'
-      else if (wordCount <= 15) sentenceLevel = 'intermediate'
-      else sentenceLevel = 'advanced'
-    } else {
-      if (wordCount <= 4) sentenceLevel = 'beginner'
-      else if (wordCount <= 10) sentenceLevel = 'intermediate'
-      else sentenceLevel = 'advanced'
     }
+
+    const sentenceLevel = assessment.level || 'beginner'
 
     const selfLevel = answers.selfLevel || 'beginner'
     const vocabLevel = answers.vocabLevel || 'beginner'
     const scores = { beginner: 1, intermediate: 2, advanced: 3 }
-    const avg = (scores[selfLevel.toLowerCase()] + scores[vocabLevel] + scores[sentenceLevel]) / 3
+    const placementScore = (
+      scores[sentenceLevel] * 0.5
+      + scores[vocabLevel] * 0.3
+      + scores[selfLevel.toLowerCase()] * 0.2
+    )
     let assessedLevel
-    if (avg < 1.5) assessedLevel = 'Beginner'
-    else if (avg < 2.5) assessedLevel = 'Intermediate'
+    if (placementScore < 1.5) assessedLevel = 'Beginner'
+    else if (placementScore < 2.5) assessedLevel = 'Intermediate'
     else assessedLevel = 'Advanced'
 
     const updatedAnswers = {
@@ -423,11 +490,15 @@ export default function SessionPage() {
       level: assessedLevel,
     }
     setAnswers(updatedAnswers)
+    const correctionNote = assessment.verdict === 'imperfect' && assessment.correction
+      ? `${assessment.feedback} A natural correction is: ${assessment.correction}`
+      : assessment.feedback
     setMessages((current) => [
       ...current,
       { role: 'user', text },
-      { role: 'coach', text: `I'll start you at ${assessedLevel}. We can always adjust as we go.` },
+      { role: 'coach', text: `${correctionNote ? `${correctionNote} ` : ''}I'll start you at ${assessedLevel}. We can always adjust as we go.` },
     ])
+    setIsCoachTyping(false)
     advanceAfterVocab(updatedAnswers)
   }
 
@@ -561,6 +632,52 @@ export default function SessionPage() {
     setMessages([{ role: 'coach', text: "Of course. Let us start over. What should I call you?" }])
   }
 
+  const handleBack = () => {
+    if (isCoachTyping || stepIndex <= 0) return
+
+    let previousIndex = stepIndex - 1
+    while (previousIndex > 0) {
+      const previousKey = baseSteps[previousIndex]
+      if (previousKey === 'languageVariant' && !languageFollowUps[normalizeAnswer(answers.language || '')]) {
+        previousIndex -= 1
+        continue
+      }
+      if (previousKey === 'languageRegion' && !languageRegionFollowUps[normalizeAnswer(answers.languageVariant || '')]) {
+        previousIndex -= 1
+        continue
+      }
+      break
+    }
+
+    const previousKey = baseSteps[previousIndex]
+    const previousQuestion = getStepConfig(previousKey, answers)?.question || defaultMessages[0].text
+    const nextAnswers = { ...answers }
+    delete nextAnswers[previousKey]
+    if (previousKey === 'vocabTest') {
+      delete nextAnswers.vocabScore
+      delete nextAnswers.vocabLevel
+    }
+    if (previousKey === 'sentenceTask') {
+      delete nextAnswers.sentenceTask
+      delete nextAnswers.sentenceLevel
+      delete nextAnswers.assessedLevel
+      delete nextAnswers.level
+    }
+
+    setAnswers(nextAnswers)
+    setStepIndex(previousIndex)
+    setInputValue('')
+    setSelectedOptions([])
+    setPendingLanguageSuggestion(null)
+    setVocabData(null)
+    setVocabSelections(new Set())
+    setMessages((current) => [...current, { role: 'coach', text: `Let’s go back. ${previousQuestion}` }])
+
+    if (previousKey === 'vocabTest') {
+      startVocabTest(nextAnswers)
+    }
+  }
+
   return (
     <section className="session-page">
       <div className="session-header">
@@ -577,6 +694,10 @@ export default function SessionPage() {
         <div className="card-heading">
           <span className="section-tag">Setup chat</span>
           <h2>Start your first conversation with BeaLingo.</h2>
+          <div className="setup-progress" aria-label={`Setup progress: step ${Math.min(stepIndex + 1, baseSteps.length)} of ${baseSteps.length}`}>
+            <span>Step {Math.min(stepIndex + 1, baseSteps.length)} of {baseSteps.length}</span>
+            <progress value={Math.min(stepIndex + 1, baseSteps.length)} max={baseSteps.length} />
+          </div>
         </div>
 
         <div className="chat-thread setup-thread">
@@ -616,11 +737,11 @@ export default function SessionPage() {
                 </button>
               ))}
             </div>
-            <div style={{ marginTop: '12px', display: 'flex', gap: '10px' }}>
+            <div style={{ marginTop: '12px', display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
               <button
                 type="button"
                 className="primary-button"
-                onClick={submitVocabResult}
+                onClick={() => submitVocabResult()}
               >
                 Done
               </button>
@@ -629,10 +750,20 @@ export default function SessionPage() {
                 className="secondary-button"
                 onClick={() => {
                   setVocabSelections(new Set())
-                  submitVocabResult()
+                  submitVocabResult(0)
                 }}
               >
                 I don&apos;t know any
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  setVocabSelections(new Set(vocabData.map((_, index) => index)))
+                  submitVocabResult(vocabData.length)
+                }}
+              >
+                I know it all
               </button>
             </div>
           </div>
@@ -674,6 +805,11 @@ export default function SessionPage() {
         )}
 
         <div className="chat-input-shell">
+          {stepIndex > 0 && (
+            <button type="button" className="secondary-button setup-back-button" onClick={handleBack} disabled={isCoachTyping}>
+              Back
+            </button>
+          )}
           <div className="chat-input-row">
             <input
               className="chat-input"
@@ -776,11 +912,11 @@ export default function SessionPage() {
   )
 }
 
-function ReturningUserPlaceholder({ profile, onReset }) {
-  return <DailySession profile={profile} onReset={onReset} />
+function ReturningUserPlaceholder({ profile, onReset, onProfileChange }) {
+  return <DailySession profile={profile} onReset={onReset} onProfileChange={onProfileChange} />
 }
 
-function DailySession({ profile, onReset }) {
+function DailySession({ profile, onReset, onProfileChange }) {
   const languageLabel = formatLanguageLabel(profile)
   const completedSessionCount = getCompletedSessionCount(profile)
   const todayKey = getTodayKey()
@@ -788,18 +924,24 @@ function DailySession({ profile, onReset }) {
   const dayNumber = computeDayNumber(profile, todayKey)
   const sessionCompleted = completedToday || isSessionComplete(profile, dayNumber)
   const isDayOne = dayNumber === 1
-  const allStyles = Array.isArray(profile.learningStyle)
-    ? profile.learningStyle
-    : [profile.learningStylePrimary || profile.primaryStyle || 'daily sentences']
+  const [sessionPlan] = useState(() => ({
+    learningStyle: Array.isArray(profile.learningStyle)
+      ? profile.learningStyle
+      : [profile.learningStylePrimary || profile.primaryStyle || 'daily sentences'],
+    styleSettings: profile.styleSettings || {},
+    schedule: profile.schedule,
+  }))
+  const allStyles = sessionPlan.learningStyle
   const todayStyleIndex = (dayNumber - 1) % allStyles.length
   const currentStyleName = allStyles[todayStyleIndex] || 'Daily sentences'
   const primaryStyle = currentStyleName.toLowerCase()
-  const desiredCount = getDesiredCountForStyle(profile, currentStyleName)
-  const sessionKey = `bealingo-daily-day-${dayNumber}`
+  const desiredCount = getDesiredCountForStyle({ ...profile, styleSettings: sessionPlan.styleSettings }, currentStyleName)
+  const sessionKey = `bealingo-daily-day-${dayNumber}-v${LESSON_CACHE_VERSION}`
   const extraSessionKey = `bealingo-daily-extra-day-${dayNumber}`
-  const practiceSessionKey = `bealingo-daily-practice-day-${dayNumber}`
+  const practiceSessionKey = `bealingo-daily-practice-day-${dayNumber}-v${PRACTICE_CACHE_VERSION}`
   const extraUsageKey = `bealingo-extra-usage-${todayKey}`
-  const scheduleAllowsNewLesson = isScheduledStudyDay(profile.schedule, new Date())
+  const completionBadgeKey = `bealingo-completed-badge-${todayKey}`
+  const scheduleAllowsNewLesson = isScheduledStudyDay(sessionPlan.schedule, new Date())
 
   const [lesson, setLesson] = useState(() => {
     try {
@@ -823,15 +965,16 @@ function DailySession({ profile, onReset }) {
   ])
   const [isCoachThinking, setIsCoachThinking] = useState(false)
   const [extraMaterials, setExtraMaterials] = useState(() => {
+    if (!EXTRA_LEARNING_ENABLED) return []
     try {
       const raw = window.localStorage.getItem(extraSessionKey)
-      return raw ? JSON.parse(raw) : []
+      return raw ? removeDuplicateExtraMaterials(JSON.parse(raw), lesson?.content) : []
     } catch {
       return []
     }
   })
 
-  const [revisionCards, setRevisionCards] = useState(() => completedSessionCount === 0 ? [] : pickRevisionCards(6))
+  const [revisionCards] = useState(() => completedSessionCount === 0 ? [] : pickRevisionCards(6))
   const [revisionIndex, setRevisionIndex] = useState(0)
   const [revisionDone, setRevisionDone] = useState(completedSessionCount === 0 || sessionCompleted)
   const [revisionFlipped, setRevisionFlipped] = useState(false)
@@ -862,13 +1005,25 @@ function DailySession({ profile, onReset }) {
   const [showSettings, setShowSettings] = useState(false)
   const [editGoals, setEditGoals] = useState(Array.isArray(profile.goal) ? profile.goal : [])
   const [editStyles, setEditStyles] = useState(Array.isArray(profile.learningStyle) ? profile.learningStyle : [])
+  const [editStyleSettings, setEditStyleSettings] = useState(profile.styleSettings || {})
   const [allowExtraLesson, setAllowExtraLesson] = useState(false)
+  const [justCompleted, setJustCompleted] = useState(() => {
+    try {
+      return window.localStorage.getItem(completionBadgeKey) === '1' || sessionCompleted
+    } catch {
+      return sessionCompleted
+    }
+  })
 
   useEffect(() => {
     recordLoginDay()
   }, [])
 
   useEffect(() => {
+    if (!EXTRA_LEARNING_ENABLED) {
+      window.localStorage.removeItem(extraSessionKey)
+      return
+    }
     window.localStorage.setItem(extraSessionKey, JSON.stringify(extraMaterials))
   }, [extraMaterials, extraSessionKey])
 
@@ -880,9 +1035,20 @@ function DailySession({ profile, onReset }) {
     window.localStorage.setItem(extraUsageKey, String(extraUsageCount))
   }, [extraUsageCount, extraUsageKey])
 
+  useEffect(() => {
+    if (justCompleted || sessionCompleted) {
+      window.localStorage.setItem(completionBadgeKey, '1')
+    } else {
+      window.localStorage.removeItem(completionBadgeKey)
+    }
+  }, [completionBadgeKey, justCompleted, sessionCompleted])
+
   const hasStartedLesson = !!lesson
   const canLoadLesson = sessionCompleted || hasStartedLesson || scheduleAllowsNewLesson || allowExtraLesson
-  const practiceSourceContent = buildPracticeSourceContent(lesson?.content || {}, extraMaterials)
+  const practiceSourceContent = buildPracticeSourceContent(
+    lesson?.content || {},
+    EXTRA_LEARNING_ENABLED ? extraMaterials : [],
+  )
 
   useEffect(() => {
     if (lesson || !canLoadLesson || sessionCompleted) return
@@ -919,8 +1085,8 @@ function DailySession({ profile, onReset }) {
     }
   }
 
-  const handleAsk = async () => {
-    const text = chatInput.trim()
+  const handleAsk = async (prefilledText = '') => {
+    const text = (typeof prefilledText === 'string' && prefilledText ? prefilledText : chatInput).trim()
     if (!text || isCoachThinking) return
     setChatMessages((prev) => [...prev, { role: 'user', text }])
     setChatInput('')
@@ -929,6 +1095,16 @@ function DailySession({ profile, onReset }) {
       const extraRequest = parseExtraPracticeRequest(text)
     try {
       if (extraRequest) {
+        if (!EXTRA_LEARNING_ENABLED) {
+          setChatMessages((prev) => [
+            ...prev,
+            {
+              role: 'coach',
+              text: 'BeaLingo includes one learning session per day. Come back on your next study day for new material.',
+            },
+          ])
+          return
+        }
         if (extraUsageCount >= MAX_EXTRA_REQUESTS_PER_DAY) {
           setChatMessages((prev) => [
             ...prev,
@@ -939,7 +1115,12 @@ function DailySession({ profile, onReset }) {
           ])
           return
         }
-        const result = await generateLesson(profile, extraRequest.style, extraRequest.count)
+        const excludeItems = collectTaughtItems(lesson?.content, extraMaterials)
+        const result = await generateLesson(
+          { ...profile, excludeItems },
+          extraRequest.style,
+          extraRequest.count,
+        )
         const extraContent = trimGeneratedContent(result?.content || {}, extraRequest.style, extraRequest.count)
         const items = extractItemsFromLesson(extraContent)
         if (items.length > 0) addItemsToPile(items)
@@ -1007,24 +1188,19 @@ function DailySession({ profile, onReset }) {
   }
 
   const handleCompleteSession = () => {
+    if (sessionCompleted || justCompleted) return
     const feedbackSummary = evaluateLessonFeedback(itemFeedback, profile.level, todayKey)
+    const latestProfile = getLearningProfile() || profile
     const updatedProfile = {
-      ...profile,
+      ...latestProfile,
       level: feedbackSummary.nextLevel,
       assessedLevel: feedbackSummary.nextLevel,
       lastBatchFeedbackSummary: feedbackSummary,
     }
-    markSessionComplete(updatedProfile, dayNumber)
+    const completedProfile = markSessionComplete(updatedProfile, dayNumber)
+    onProfileChange?.(completedProfile)
     setRevisionDone(true)
-    window.localStorage.removeItem(sessionKey)
-    window.localStorage.removeItem(extraSessionKey)
-    window.localStorage.removeItem(practiceSessionKey)
-    setFlippedCards(new Set())
-    setExtraMaterials([])
-    setPracticeQuestions([])
-    setPracticeVisible(false)
-    setChatMessages([{ role: 'coach', text: "Ask me anything about today's lesson." }])
-    window.location.reload()
+    setJustCompleted(true)
   }
 
   const handlePracticeToggle = async () => {
@@ -1090,7 +1266,7 @@ function DailySession({ profile, onReset }) {
             <h2>No new lesson is scheduled for today.</h2>
           </div>
           <p className="plan-detail">
-            Your preference is <strong>{profile.schedule || 'Every day'}</strong>. BeaLingo will wait until your next scheduled study day before creating a new lesson.
+            Your preference is <strong>{sessionPlan.schedule || 'Every day'}</strong>. BeaLingo will wait until your next scheduled study day before creating a new lesson.
           </p>
           <div className="summary-actions">
             <button type="button" className="secondary-button" onClick={() => setAllowExtraLesson(true)}>
@@ -1161,7 +1337,17 @@ function DailySession({ profile, onReset }) {
                         advanceRevision()
                       }}
                     >
-                      I don&apos;t know
+                      Needs review
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => {
+                        markCardFamiliar(card.id)
+                        advanceRevision()
+                      }}
+                    >
+                      Familiar
                     </button>
                     <button
                       type="button"
@@ -1171,7 +1357,7 @@ function DailySession({ profile, onReset }) {
                         advanceRevision()
                       }}
                     >
-                      I know this
+                      Mastered
                     </button>
                   </div>
                 )}
@@ -1190,7 +1376,7 @@ function DailySession({ profile, onReset }) {
         </section>
       )}
 
-      {(!sessionCompleted && canLoadLesson) && (completedSessionCount === 0 || revisionDone || revisionCards.length === 0 || sessionCompleted) && (
+      {(lesson || (!sessionCompleted && canLoadLesson)) && (completedSessionCount === 0 || revisionDone || revisionCards.length === 0 || sessionCompleted) && (
       <section className="session-card sentences-card">
         <div className="card-heading">
           <span className="section-tag">New today</span>
@@ -1210,7 +1396,14 @@ function DailySession({ profile, onReset }) {
         )}
 
         {isLoading && !content.sentences && !content.flashcards && !content.scenario && !content.questions && (
-          <p className="plan-detail">Your coach is writing fresh {languageLabel} content for you...</p>
+          <div role="status" aria-live="polite">
+            <p className="plan-detail">Your coach is writing fresh {languageLabel} content for you...</p>
+            <span className="lesson-loading" aria-label="Loading lesson">
+              <span aria-hidden="true" />
+              <span aria-hidden="true" />
+              <span aria-hidden="true" />
+            </span>
+          </div>
         )}
 
         {lessonError && (
@@ -1435,7 +1628,7 @@ function DailySession({ profile, onReset }) {
           </ol>
         )}
 
-        {!practiceVisible && extraMaterials.length > 0 && (
+        {EXTRA_LEARNING_ENABLED && !practiceVisible && extraMaterials.length > 0 && (
           <div className="extra-materials-stack">
             {extraMaterials.map((extra, extraIndex) => (
               <section key={extra.id} className="session-card extra-material-card">
@@ -1460,7 +1653,7 @@ function DailySession({ profile, onReset }) {
           </div>
         )}
 
-        {!isLoading && !lessonError && lesson && (
+        {EXTRA_LEARNING_ENABLED && !isLoading && !lessonError && lesson && (
           <section className="learn-more-card">
             <div className="card-heading">
               <span className="section-tag">Learn more</span>
@@ -1472,14 +1665,24 @@ function DailySession({ profile, onReset }) {
             <p className="learn-more-note">
               Limit: up to {MAX_EXTRA_REQUESTS_PER_DAY} extra requests per study day, with up to {MAX_EXTRA_ITEMS_PER_REQUEST} items each.
             </p>
+            {extraUsageCount >= MAX_EXTRA_REQUESTS_PER_DAY && (
+              <p className="learn-more-note" role="status">
+                You’ve used today’s extra material. Another Learn more batch will be available on your next study day.
+              </p>
+            )}
             <div className="summary-actions">
               <button
                 type="button"
                 className="secondary-button"
                 title={`You can ask for extra practice up to ${MAX_EXTRA_REQUESTS_PER_DAY} times per study day, with up to ${MAX_EXTRA_ITEMS_PER_REQUEST} items each.`}
-                onClick={() => setChatInput(`5 more ${styleLabel}`)}
+                onClick={() => handleAsk(`3 more ${styleLabel}`)}
+                disabled={isCoachThinking || extraUsageCount >= MAX_EXTRA_REQUESTS_PER_DAY}
               >
-                Learn more
+                {isCoachThinking
+                  ? 'Adding...'
+                  : extraUsageCount >= MAX_EXTRA_REQUESTS_PER_DAY
+                    ? 'Daily extra used'
+                    : 'Learn more'}
               </button>
             </div>
           </section>
@@ -1663,26 +1866,31 @@ function DailySession({ profile, onReset }) {
           </div>
         </div>
 
-        {!sessionCompleted && lesson && !isLoading && !lessonError && (
+        {lesson && !isLoading && !lessonError && (
           <div className="summary-actions" style={{ marginTop: '20px' }}>
-            <button type="button" className="primary-button" onClick={handleCompleteSession}>
-              Finish today&apos;s lesson
+            <button
+              type="button"
+              className="primary-button"
+              onClick={handleCompleteSession}
+              disabled={sessionCompleted || justCompleted}
+            >
+              {sessionCompleted || justCompleted ? 'Finished today' : "Finish today's lesson"}
             </button>
+            {(sessionCompleted || justCompleted) && <span className="completion-confetti">🎉</span>}
           </div>
         )}
 
-        {!sessionCompleted && lesson && !isLoading && !lessonError && (
+        {lesson && !isLoading && !lessonError && (
           <p className="plan-detail" style={{ marginTop: '10px' }}>
-            Mark this when you&apos;ve finished the lesson. BeaLingo uses it to decide when to unlock your next revision and lesson day.
+            {sessionCompleted || justCompleted
+              ? "You've finished today's lesson. Come back tomorrow for another lesson."
+              : 'Mark this when you have finished the lesson. BeaLingo uses it to decide when to unlock your next revision and lesson day.'}
           </p>
         )}
       </section>
       )}
 
       <div className="summary-actions">
-        <button type="button" className="secondary-button" onClick={handleRegenerate} disabled={isLoading}>
-          Regenerate today&apos;s lesson
-        </button>
         <button type="button" className="secondary-button" onClick={() => setShowSettings(!showSettings)}>
           {showSettings ? 'Close settings' : 'Change preferences'}
         </button>
@@ -1697,6 +1905,10 @@ function DailySession({ profile, onReset }) {
             <span className="section-tag">Preferences</span>
             <h2>Update your learning preferences</h2>
           </div>
+
+          <p className="plan-detail">
+            Changes saved here will apply from your next lesson onward. Today&apos;s lesson will stay the same.
+          </p>
 
           <div className="settings-group">
             <h3>Goals</h3>
@@ -1719,7 +1931,7 @@ function DailySession({ profile, onReset }) {
           <div className="settings-group">
             <h3>Learning styles</h3>
             <div className="option-row" style={{ flexWrap: 'wrap', gap: '8px' }}>
-              {['Daily sentences', 'Flashcards', 'Quizzes', 'Conversation scenarios'].map((s) => (
+              {['Daily sentences', 'Flashcards', 'Conversation scenarios'].map((s) => (
                 <button
                   key={s}
                   type="button"
@@ -1734,17 +1946,49 @@ function DailySession({ profile, onReset }) {
             </div>
           </div>
 
+          {editStyles.map((style) => {
+            const quantityPreference = getStyleQuantityPreference(style)
+            if (!quantityPreference) return null
+            return (
+              <div className="settings-group" key={`quantity-${style}`}>
+                <h3>{quantityPreference.question}</h3>
+                <div className="option-row" style={{ flexWrap: 'wrap', gap: '8px' }}>
+                  {quantityPreference.options.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={`option-chip ${editStyleSettings[style] === option ? 'selected' : ''}`}
+                      onClick={() => setEditStyleSettings((current) => ({ ...current, [style]: option }))}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
+
           <div className="summary-actions" style={{ marginTop: '16px' }}>
             <button
               type="button"
               className="primary-button"
-              disabled={editGoals.length === 0 || editStyles.length === 0}
+              disabled={
+                editGoals.length === 0
+                || editStyles.length === 0
+                || editStyles.some((style) => !editStyleSettings[style])
+              }
               onClick={() => {
-                const updated = { ...profile, goal: editGoals, learningStyle: editStyles }
-                saveLearningProfile(updated)
+                const latestProfile = getLearningProfile() || profile
+                const updated = saveLearningProfile({
+                  ...latestProfile,
+                  goal: editGoals,
+                  goals: editGoals,
+                  learningStyle: editStyles,
+                  learningStyles: editStyles,
+                  styleSettings: editStyleSettings,
+                })
+                onProfileChange?.(updated)
                 setShowSettings(false)
-                handleRegenerate()
-                window.location.reload()
               }}
             >
               Save changes
@@ -1773,11 +2017,20 @@ function computeDayNumber(profile, todayKey = getTodayKey()) {
 }
 
 function getTodayKey() {
-  return new Date().toISOString().slice(0, 10)
+  return getLocalDateKey(new Date())
 }
 
 function isSameStudyDate(isoString, dateKey) {
-  return typeof isoString === 'string' && isoString.slice(0, 10) === dateKey
+  if (typeof isoString !== 'string') return false
+  const date = new Date(isoString)
+  return !Number.isNaN(date.getTime()) && getLocalDateKey(date) === dateKey
+}
+
+function getLocalDateKey(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
 function isScheduledStudyDay(schedule, date) {
@@ -1837,6 +2090,50 @@ function parseExtraPracticeRequest(text) {
   return null
 }
 
+function collectContentItemKeys(content) {
+  const keys = []
+  for (const card of content?.flashcards || []) keys.push(card?.front)
+  for (const sentence of content?.sentences || []) keys.push(sentence?.target || sentence?.source)
+  for (const question of content?.questions || []) keys.push(question?.prompt)
+  for (const exchange of content?.scenario?.exchanges || []) keys.push(exchange?.lineTarget)
+  return keys.filter(Boolean).map((item) => String(item).trim().toLocaleLowerCase())
+}
+
+function collectTaughtItems(baseContent, extraMaterials) {
+  return [
+    ...collectContentItemKeys(baseContent),
+    ...(extraMaterials || []).flatMap((extra) => collectContentItemKeys(extra?.content)),
+  ]
+}
+
+function removeDuplicateExtraMaterials(materials, baseContent) {
+  if (!Array.isArray(materials)) return []
+  const seen = new Set(collectContentItemKeys(baseContent))
+
+  return materials.flatMap((extra) => {
+    const content = extra?.content || {}
+    const keepUnique = (items, keyFor) => (items || []).filter((item) => {
+      const key = String(keyFor(item) || '').trim().toLocaleLowerCase()
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    const cleaned = {
+      ...content,
+      flashcards: keepUnique(content.flashcards, (item) => item?.front),
+      sentences: keepUnique(content.sentences, (item) => item?.target || item?.source),
+      questions: keepUnique(content.questions, (item) => item?.prompt),
+    }
+    if (content.scenario) {
+      cleaned.scenario = {
+        ...content.scenario,
+        exchanges: keepUnique(content.scenario.exchanges, (item) => item?.lineTarget),
+      }
+    }
+    return collectContentItemKeys(cleaned).length > 0 ? [{ ...extra, content: cleaned }] : []
+  })
+}
+
 function trimGeneratedContent(content, style, count) {
   const safeCount = Math.max(1, count || 1)
   const normalizedStyle = String(style || '').toLowerCase()
@@ -1881,6 +2178,7 @@ function buildPracticeSourceContent(baseContent, extraMaterials) {
     sentences: [...(baseContent?.sentences || [])],
     flashcards: [...(baseContent?.flashcards || [])],
     questions: [...(baseContent?.questions || [])],
+    practice: [...(baseContent?.practice || [])],
     scenario: baseContent?.scenario
       ? { ...baseContent.scenario, exchanges: [...(baseContent.scenario.exchanges || [])] }
       : null,
@@ -1895,6 +2193,9 @@ function buildPracticeSourceContent(baseContent, extraMaterials) {
     }
     if (Array.isArray(extra?.content?.questions)) {
       combined.questions.push(...extra.content.questions)
+    }
+    if (Array.isArray(extra?.content?.practice)) {
+      combined.practice.push(...extra.content.practice)
     }
     if (Array.isArray(extra?.content?.scenario?.exchanges)) {
       if (!combined.scenario) {
@@ -1911,6 +2212,7 @@ function buildPracticeSourceContent(baseContent, extraMaterials) {
 }
 
 function getPracticeQuestionCount(content, fallbackCount) {
+  if (Array.isArray(content?.practice) && content.practice.length > 0) return Math.min(content.practice.length, MAX_PRACTICE_QUESTIONS)
   if (Array.isArray(content?.sentences) && content.sentences.length > 0) return Math.min(content.sentences.length, MAX_PRACTICE_QUESTIONS)
   if (Array.isArray(content?.flashcards) && content.flashcards.length > 0) return Math.min(content.flashcards.length, MAX_PRACTICE_QUESTIONS)
   if (Array.isArray(content?.questions) && content.questions.length > 0) return Math.min(content.questions.length, MAX_PRACTICE_QUESTIONS)
@@ -2206,23 +2508,48 @@ function getAdjustedLevel(currentLevel, direction) {
   return levels[Math.max(currentIndex, 0)]
 }
 
-function getDesiredSentenceCount(profile) {
-  const setting = profile.styleSettings?.[profile.primaryStyle] || ''
-  const parsed = parseInt(setting, 10)
-  if (Number.isFinite(parsed) && parsed > 0 && parsed < 20) return parsed
-  return 2
-}
-
 function getDesiredCountForStyle(profile, styleName) {
   const settings = profile.styleSettings || {}
   const setting = settings[styleName] || ''
   const parsed = parseInt(setting, 10)
   if (Number.isFinite(parsed) && parsed > 0 && parsed < 50) return parsed
+  if (setting === 'Short exchange') return 2
+  if (setting === 'Medium dialogue') return 4
+  if (setting === 'Longer scenario') return 6
   const lower = styleName.toLowerCase()
   if (lower.includes('flashcard')) return 5
   if (lower.includes('quiz')) return 5
   if (lower.includes('conversation')) return 4
   return 2
+}
+
+function getStyleQuantityPreference(styleName) {
+  const normalizedStyle = normalizeAnswer(styleName)
+  if (normalizedStyle === 'daily sentences') {
+    return {
+      question: 'How many new sentences would you like in a lesson?',
+      options: ['1 sentence', '2 sentences', '3 sentences', '5 sentences'],
+    }
+  }
+  if (normalizedStyle === 'flashcards') {
+    return {
+      question: 'How many flashcards would you like in a lesson?',
+      options: ['3 flashcards', '5 flashcards', '8 flashcards', '10 flashcards'],
+    }
+  }
+  if (normalizedStyle === 'conversation scenarios') {
+    return {
+      question: 'How long would you like each conversation lesson?',
+      options: ['Short exchange', 'Medium dialogue', 'Longer scenario'],
+    }
+  }
+  if (normalizedStyle === 'quizzes') {
+    return {
+      question: 'How many questions would you like in each quiz?',
+      options: ['3 questions', '5 questions', '8 questions', '10 questions'],
+    }
+  }
+  return null
 }
 
 function getStepConfig(stepKey, answers) {
@@ -2409,10 +2736,13 @@ function normalizeAnswer(value) {
 function getSavedSessionData() {
   const fallback = {
     stepIndex: 0,
+    inputValue: '',
     answers: {},
     selectedOptions: [],
     pendingLanguageSuggestion: null,
     messages: defaultMessages,
+    vocabData: null,
+    vocabSelections: [],
   }
 
   try {
@@ -2424,10 +2754,13 @@ function getSavedSessionData() {
     const parsed = JSON.parse(raw)
     return {
       stepIndex: Number.isInteger(parsed.stepIndex) ? parsed.stepIndex : 0,
+      inputValue: typeof parsed.inputValue === 'string' ? parsed.inputValue : '',
       answers: parsed.answers && typeof parsed.answers === 'object' ? parsed.answers : {},
       selectedOptions: Array.isArray(parsed.selectedOptions) ? parsed.selectedOptions : [],
       pendingLanguageSuggestion: parsed.pendingLanguageSuggestion || null,
       messages: Array.isArray(parsed.messages) && parsed.messages.length > 0 ? parsed.messages : defaultMessages,
+      vocabData: Array.isArray(parsed.vocabData) ? parsed.vocabData : null,
+      vocabSelections: Array.isArray(parsed.vocabSelections) ? parsed.vocabSelections : [],
     }
   } catch {
     return fallback
@@ -2519,15 +2852,6 @@ function joinAnswerList(value) {
   return Array.isArray(value) ? value.join(', ') : value
 }
 
-function buildSecondaryList(values, primaryValue) {
-  if (!Array.isArray(values) || values.length <= 1) {
-    return ''
-  }
-
-  const secondaryValues = primaryValue ? values.filter((value) => value !== primaryValue) : values.slice(1)
-  return secondaryValues.join(', ')
-}
-
 function sentenceCase(value) {
   if (!value) {
     return value
@@ -2563,7 +2887,7 @@ function getLearningStyleAmountStep(answers) {
       styleKey: nextStyle,
       question: 'How many flashcards would you like in a set?',
       placeholder: 'Tell me how many flashcards you want...',
-      options: ['5 flashcards', '10 flashcards', '15 flashcards', '20 flashcards'],
+      options: ['3 flashcards', '5 flashcards', '8 flashcards', '10 flashcards'],
     }
   }
 

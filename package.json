@@ -1,12 +1,16 @@
 {
-  "name": "language-learning",
+  "name": "bealingo",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:private": "vite --host 127.0.0.1 --port 5180",
     "build": "vite build",
     "lint": "eslint .",
+    "test": "npm run test:frontend && npm run test:backend",
+    "test:frontend": "node --test tests/*.test.js",
+    "test:backend": "backend/venv/bin/python -m unittest discover -s backend/tests -v",
     "preview": "vite preview"
   },
   "dependencies": {
