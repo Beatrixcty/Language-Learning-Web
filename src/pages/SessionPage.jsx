@@ -1044,7 +1044,13 @@ function DailySession({ profile, onReset, onProfileChange }) {
   }, [completionBadgeKey, justCompleted, sessionCompleted])
 
   const hasStartedLesson = !!lesson
-  const canLoadLesson = sessionCompleted || hasStartedLesson || scheduleAllowsNewLesson || allowExtraLesson
+  // A learner should always receive the first lesson immediately after setup.
+  // Their chosen schedule controls later study days, not the onboarding payoff.
+  const canLoadLesson = completedSessionCount === 0
+    || sessionCompleted
+    || hasStartedLesson
+    || scheduleAllowsNewLesson
+    || allowExtraLesson
   const practiceSourceContent = buildPracticeSourceContent(
     lesson?.content || {},
     EXTRA_LEARNING_ENABLED ? extraMaterials : [],
@@ -1395,8 +1401,8 @@ function DailySession({ profile, onReset, onProfileChange }) {
           </p>
         )}
 
-        {isLoading && !content.sentences && !content.flashcards && !content.scenario && !content.questions && (
-          <div role="status" aria-live="polite">
+        {isLoading && (
+          <div className="lesson-loading-state" role="status" aria-live="polite">
             <p className="plan-detail">Your coach is writing fresh {languageLabel} content for you...</p>
             <span className="lesson-loading" aria-label="Loading lesson">
               <span aria-hidden="true" />

@@ -624,6 +624,19 @@
   margin-top: 10px;
 }
 
+.lesson-loading-state {
+  width: fit-content;
+  min-width: min(100%, 320px);
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.lesson-loading-state .plan-detail {
+  margin: 0;
+}
+
 .lesson-loading span {
   width: 10px;
   height: 10px;

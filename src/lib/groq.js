@@ -11,18 +11,31 @@ export async function getChatGPTStatus() {
 }
 
 async function postJson(path, body) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(`API request failed (${response.status}): ${text}`)
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 75_000)
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(`API request failed (${response.status}): ${text}`)
+    }
+    const data = await response.json()
+    if (data.error) throw new Error(data.error)
+    return data
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('The lesson is taking too long to prepare. Please try again.')
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
   }
-  const data = await response.json()
-  if (data.error) throw new Error(data.error)
-  return data
 }
 
 export async function fetchVocabList(targetLanguage) {
