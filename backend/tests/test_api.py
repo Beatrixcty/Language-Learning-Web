@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import unittest
@@ -167,6 +168,51 @@ class BeaLingoApiTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 429)
         self.assertIn("daily AI limit", response.json()["error"])
+
+    def test_demo_repairs_duplicate_practice_options_without_second_ai_call(self):
+        draft = {
+            "sentences": [
+                {
+                    "source": "I would like a coffee.",
+                    "target": "Queria um café.",
+                    "meaning": "A polite way to order.",
+                    "exampleTarget": "Queria uma água.",
+                    "exampleSource": "I would like a water.",
+                }
+            ],
+            "vocabulary": [
+                {"front": "queria", "back": "I would like", "note": "polite request", "partOfSpeech": "verb"},
+                {"front": "café", "back": "coffee", "note": "drink", "partOfSpeech": "noun"},
+                {"front": "água", "back": "water", "note": "drink", "partOfSpeech": "noun"},
+                {"front": "uma", "back": "a", "note": "feminine article", "partOfSpeech": "adjective"},
+            ],
+            "practice": [
+                {
+                    "prompt": "What does café mean?",
+                    "options": ["coffee", "water", "coffee", "I would like"],
+                    "answer": "coffee",
+                    "type": "multiple_choice",
+                    "explanation": "Café means coffee.",
+                }
+                for _ in range(3)
+            ],
+        }
+        with patch.object(main, "_call_json_with_groq", return_value=json.dumps(draft)) as generate:
+            result = main._generate_validated_json(
+                "system",
+                "user",
+                {"language": "Portuguese", "languageVariant": "European Portuguese"},
+                temperature=0.7,
+                max_tokens=900,
+                attempts=1,
+                response_schema=main.SENTENCE_LESSON_SCHEMA,
+            )
+
+        self.assertEqual(generate.call_count, 1)
+        for question in result["practice"]:
+            self.assertEqual(len(question["options"]), 4)
+            self.assertEqual(len(set(question["options"])), 4)
+            self.assertIn(question["answer"], question["options"])
 
 
 if __name__ == "__main__":

@@ -656,6 +656,89 @@ def _find_practice_quality_gaps(content: Any) -> list[str]:
     return gaps
 
 
+def _repair_practice_options(content: Any) -> Any:
+    """Repair small Groq option-list defects from the generated lesson itself.
+
+    This keeps a duplicated or omitted distractor from discarding an otherwise
+    useful lesson, without introducing a second model call or a fixed content
+    library. All replacement choices come from material Groq already generated.
+    """
+    if not isinstance(content, dict) or not isinstance(content.get("practice"), list):
+        return content
+
+    target_pool: list[str] = []
+    source_pool: list[str] = []
+
+    def add(pool: list[str], value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text.casefold() not in {item.casefold() for item in pool}:
+            pool.append(text)
+
+    for sentence in content.get("sentences") or []:
+        if isinstance(sentence, dict):
+            add(target_pool, sentence.get("target"))
+            add(target_pool, sentence.get("exampleTarget"))
+            add(source_pool, sentence.get("source"))
+            add(source_pool, sentence.get("exampleSource"))
+    for item in content.get("vocabulary") or []:
+        if isinstance(item, dict):
+            add(target_pool, item.get("front"))
+            add(source_pool, item.get("back"))
+    for card in content.get("flashcards") or []:
+        if isinstance(card, dict):
+            add(target_pool, card.get("front"))
+            add(target_pool, card.get("exampleTarget"))
+            add(source_pool, card.get("back"))
+            add(source_pool, card.get("exampleSource"))
+    for exchange in (content.get("scenario") or {}).get("exchanges", []) or []:
+        if isinstance(exchange, dict):
+            add(target_pool, exchange.get("lineTarget"))
+            add(source_pool, exchange.get("lineSource"))
+
+    target_keys = {item.casefold() for item in target_pool}
+    source_keys = {item.casefold() for item in source_pool}
+    combined_pool = target_pool + source_pool
+
+    for question in content["practice"]:
+        if not isinstance(question, dict):
+            continue
+        answer = str(question.get("answer") or "").strip()
+        if not answer:
+            continue
+        raw_options = question.get("options") if isinstance(question.get("options"), list) else []
+        options: list[str] = []
+        seen: set[str] = set()
+        for option in [answer, *raw_options]:
+            candidate = str(option or "").strip()
+            key = candidate.casefold()
+            if not candidate or key in seen or re.fullmatch(r"option\s*[a-z0-9]+", candidate, re.IGNORECASE):
+                continue
+            options.append(candidate)
+            seen.add(key)
+
+        answer_key = answer.casefold()
+        if answer_key in target_keys:
+            preferred_pool = target_pool + source_pool
+        elif answer_key in source_keys:
+            preferred_pool = source_pool + target_pool
+        else:
+            preferred_pool = combined_pool
+        for candidate in preferred_pool:
+            key = candidate.casefold()
+            if key not in seen:
+                options.append(candidate)
+                seen.add(key)
+            if len(options) == 4:
+                break
+
+        if len(options) >= 4:
+            question["options"] = options[:4]
+        if not str(question.get("explanation") or "").strip():
+            question["explanation"] = f'The correct answer is “{answer}”.'
+
+    return content
+
+
 def _generate_validated_json(
     system_msg: str,
     user_msg: str,
@@ -685,10 +768,11 @@ def _generate_validated_json(
                 "Do not include markdown fences, commentary, or trailing text."
             )
             continue
+        parsed = _repair_practice_options(_normalize_lesson_vocabulary(parsed))
         mismatches = _find_variant_mismatches(profile, parsed)
         focus_vocab_gaps = _find_focus_vocab_gaps(parsed) + _find_practice_quality_gaps(parsed)
         if not mismatches and not focus_vocab_gaps:
-            return _normalize_lesson_vocabulary(parsed)
+            return parsed
         last_mismatches = mismatches
         last_focus_vocab_gaps = focus_vocab_gaps
         retry_reasons = []
